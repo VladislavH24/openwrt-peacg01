@@ -35,8 +35,7 @@ jobs:
 
       - name: Clone and inspect patches
         run: |
-          git clone --depth 1 --branch perenio-peacg01 \
-            https://github.com/u236/openwrt-patches.git patches
+          git clone --depth 1 https://github.com/u236/openwrt-patches.git patches
           echo "=== Содержимое репозитория патчей: ==="
           find patches -type f -not -path "*/.git/*" | sort
 
