@@ -40,51 +40,65 @@ jobs:
           find patches -type f -not -path "*/.git/*" | sort
 
       - name: Apply patches
+        env:
+          PATCH_BASE: v22.03.5
         run: |
           cd openwrt
 
-          # Корень с патчами: либо корень ветки, либо директория perenio-peacg01 внутри
-          if [ -d ../patches/perenio-peacg01 ] && \
-             [ -z "$(find ../patches -mindepth 1 -maxdepth 1 -type f -not -path '*/.git*' -print -quit)" ]; then
-            SRC=../patches/perenio-peacg01
-          else
-            SRC=../patches
+          # Оверлеи лежат в директории версии (v22.03.5); если её нет — берём корень
+          BASE=../patches/perenio-peacg01
+          SRC="$BASE/v22.03.5"
+          if [ ! -d "$SRC" ]; then
+            echo "Директория $SRC не найдена — использую корень репозитория патчей"
+            SRC="$BASE"
           fi
-          echo "=== Корень патчей: $SRC ==="
+          echo "=== Корень патчей (оверлеи): $SRC ==="
 
-          echo "=== Применяем .patch-файлы ==="
-          failed=""
-          while IFS= read -r p; do
-            rel="${p#$SRC/}"
-            echo "--- $rel"
-            if git apply --whitespace=nowarn "$p"; then
-              echo "OK: git apply"
-            elif git apply --3way --whitespace=nowarn "$p"; then
-              echo "OK: git apply --3way"
-            elif patch -p1 --forward --batch < "$p"; then
-              echo "OK: patch -p1"
-            else
-              echo "FAILED: $rel"
-              failed="$failed $rel"
-            fi
-          done < <(find "$SRC" -type f -name '*.patch' | sort)
+          mkdir -p ../patch-overwrites /tmp/merge-base
 
-          echo "=== Копируем файлы-оверлеи (не .patch) ==="
+          status=0
           while IFS= read -r f; do
             rel="${f#$SRC/}"
-            if [ -e "$rel" ]; then
-              echo "OVERWRITE: '$rel' уже существует в дереве OpenWrt — не затираю, копирую в ../patch-overwrites/"
-              mkdir -p "../patch-overwrites/$(dirname "$rel")"
-              cp "$f" "../patch-overwrites/$rel"
-            else
-              echo "COPY: $rel"
+
+            # Служебные файлы и opkg-артефакты 22.03 в прошивку 25.12 не переносим
+            case "$rel" in
+              README*|.config|files/etc/opkg/*)
+                echo "SKIP: $rel (не переносится в 25.12)"
+                continue
+                ;;
+            esac
+
+            if [ ! -e "$rel" ]; then
+              echo "COPY: $rel — новый файл в дереве OpenWrt"
               mkdir -p "$(dirname "$rel")"
               cp "$f" "$rel"
+            else
+              echo "MERGE: $rel уже существует в 25.12 — трёхстороннее слияние diff3"
+              mkdir -p "/tmp/merge-base/$(dirname "$rel")"
+              if curl -fsSL "https://raw.githubusercontent.com/openwrt/openwrt/${PATCH_BASE}/${rel}" \
+                   -o "/tmp/merge-base/${rel}"; then
+                if diff3 -m "$rel" "/tmp/merge-base/${rel}" "$f" > "$rel.merged"; then
+                  mv "$rel.merged" "$rel"
+                  echo "MERGED: $rel — изменения 22.03.5 легли на 25.12 чисто"
+                else
+                  echo "CONFLICT: $rel — diff3 оставил маркеры, файл в артефакте merged/"
+                  mkdir -p "../patch-overwrites/merged/$(dirname "$rel")"
+                  cp "$rel.merged" "../patch-overwrites/merged/$rel"
+                  mkdir -p "../patch-overwrites/from-patches/$(dirname "$rel")"
+                  cp "$f" "../patch-overwrites/from-patches/$rel"
+                  status=1
+                fi
+              else
+                echo "MANUAL: не удалось скачать базу ${PATCH_BASE} для $rel — оверлей в артефакте from-patches/"
+                mkdir -p "../patch-overwrites/from-patches/$(dirname "$rel")"
+                cp "$f" "../patch-overwrites/from-patches/$rel"
+                status=1
+              fi
             fi
-          done < <(find "$SRC" -type f ! -name '*.patch' | sort)
+          done < <(find "$SRC" -type f | sort)
 
-          if [ -n "$failed" ]; then
-            echo "Не применились патчи:$failed"
+          if [ "$status" -ne 0 ]; then
+            echo "Есть конфликты слияния — разбери артефакт patch-overwrites"
             exit 1
           fi
 
