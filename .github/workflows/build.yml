@@ -36,7 +36,7 @@ jobs:
         env:
           PATCH_BASE: v22.03.5
         run: |
-          echo "=== APPLY-PATCHES v6: восстановленный файл (v5 + восстановленный хвост), без HOMEd в прошивке, репозиторий и ключ вшиваем в files/ ==="
+          echo "=== APPLY-PATCHES v8: только sysupgrade-образ, новый источник ключа HOMEd (apk.homed.dev/apk.key), репозиторий и ключ вшиваем в files/ ==="
           cd openwrt
 
           BASE=../patches/perenio-peacg01
@@ -239,14 +239,27 @@ jobs:
         run: |
           cd openwrt
 
-          # Ключ репозитория: PEM-формат opkg и apk совпадает, кладём как есть.
+          # Ключ репозитория: основной источник — apk.homed.dev/apk.key (актуальный адрес
+          # по wiki HOMEd для APK-репозитория), запасной — opkg.homed.dev/opkg.key.
           mkdir -p files/etc/apk/keys
-          if curl -fsSL https://opkg.homed.dev/opkg.key -o files/etc/apk/keys/homed-dev.pub \
-             && grep -q "BEGIN PUBLIC KEY" files/etc/apk/keys/homed-dev.pub; then
-            echo "Ключ HOMEd скачан: files/etc/apk/keys/homed-dev.pub ($(wc -c < files/etc/apk/keys/homed-dev.pub) байт)"
+          KEY_OK=0
+          if curl -fsSL https://apk.homed.dev/apk.key -o files/etc/apk/keys/homed-dev.pub \
+             && [ -s files/etc/apk/keys/homed-dev.pub ]; then
+            KEY_OK=1
+            echo "Ключ HOMEd скачан с apk.homed.dev/apk.key ($(wc -c < files/etc/apk/keys/homed-dev.pub) байт)"
+          elif curl -fsSL https://opkg.homed.dev/opkg.key -o files/etc/apk/keys/homed-dev.pub \
+             && [ -s files/etc/apk/keys/homed-dev.pub ]; then
+            KEY_OK=1
+            echo "Ключ HOMEd скачан с opkg.homed.dev/opkg.key (запасной адрес) ($(wc -c < files/etc/apk/keys/homed-dev.pub) байт)"
           else
-            echo "ПРЕДУПРЕЖДЕНИЕ: ключ не скачался или не похож на PEM — проверь https://opkg.homed.dev/opkg.key"
+            echo "ОШИБКА: ключ не скачался ни с apk.homed.dev/apk.key, ни с opkg.homed.dev/opkg.key"
             exit 1
+          fi
+
+          if grep -q "BEGIN" files/etc/apk/keys/homed-dev.pub; then
+            echo "Ключ выглядит как PEM"
+          else
+            echo "ПРЕДУПРЕЖДЕНИЕ: ключ не похож на PEM — если apk на устройстве ругнётся на подпись, поправим ключ вручную"
           fi
 
           # Репозиторий: проверяем mips_24kc (big-endian, правильный для ath79), иначе mipsel
@@ -313,7 +326,7 @@ jobs:
       - name: Verify config
         run: |
           cd openwrt
-          echo "=== VERIFY-CONFIG v6 ==="
+          echo "=== VERIFY-CONFIG v8 ==="
           grep -q "CONFIG_TARGET_ath79_nand_DEVICE_perenio_peacg01=y" .config \
             || { echo "ОШИБКА: профиль perenio_peacg01 не включён в .config"; exit 1; }
           grep -q "CONFIG_PACKAGE_ser2net=y" .config \
@@ -337,14 +350,13 @@ jobs:
           echo "=== Результаты сборки: ==="
           find bin/targets -type f 2>/dev/null | sort || echo "bin/targets пуст — сборка не завершилась"
 
-      - name: Upload images
+      - name: Upload images (sysupgrade only)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: openwrt-peacg01-25.12.6
+          name: openwrt-peacg01-25.12.6-sysupgrade
           path: |
-            openwrt/bin/targets/ath79/nand/*.bin
-            openwrt/bin/targets/ath79/nand/*.tar
+            openwrt/bin/targets/ath79/nand/*sysupgrade.tar
             openwrt/bin/targets/ath79/nand/*.manifest
             openwrt/bin/targets/ath79/nand/*.sha256sum
-          if-no-files-found: warn
+          if-no-files-found: error
