@@ -36,7 +36,7 @@ jobs:
         env:
           PATCH_BASE: v22.03.5
         run: |
-          echo "=== APPLY-PATCHES v8: только sysupgrade-образ, новый источник ключа HOMEd (apk.homed.dev/apk.key), репозиторий и ключ вшиваем в files/ ==="
+          echo "=== APPLY-PATCHES v9: сохранение прав файлов при слиянии (fix Permission denied) ==="
           cd openwrt
 
           BASE=../patches/perenio-peacg01
@@ -70,9 +70,11 @@ jobs:
               mkdir -p "/tmp/merge-base/$(dirname "$rel")"
               if curl -fsSL "https://raw.githubusercontent.com/openwrt/openwrt/${PATCH_BASE}/${rel}" \
                    -o "/tmp/merge-base/${rel}"; then
+                mode=$(stat -c %a "$rel")
                 if diff3 -m "$rel" "/tmp/merge-base/${rel}" "$f" > "$rel.merged"; then
                   mv "$rel.merged" "$rel"
-                  echo "MERGED: $rel — изменения 22.03.5 легли на 25.12 чисто"
+                  chmod "$mode" "$rel"
+                  echo "MERGED: $rel — изменения 22.03.5 легли на 25.12 чисто (режим $mode сохранён)"
                 else
                   echo "CONFLICT: $rel — diff3 оставил маркеры, файл в артефакте merged/"
                   mkdir -p "../patch-overwrites/merged/$(dirname "$rel")"
@@ -94,6 +96,93 @@ jobs:
             echo "Есть конфликты слияния — разбери артефакт patch-overwrites"
             exit 1
           fi
+
+      - name: Fix DTS caldata and MAC for kernel 6.12 (nvmem-cells)
+        run: |
+          cd openwrt
+          echo "=== DTS-FIX v1: mtd-cal-data/mtd-mac-address -> nvmem-cells (требование ядра 6.x) ==="
+          DTS=$(find target/linux/ath79/dts -name 'qca9531_perenio_peacg01.dts')
+          if [ -z "$DTS" ]; then
+            echo "ОШИБКА: dts qca9531_perenio_peacg01 не найден в target/linux/ath79/dts"
+            exit 1
+          fi
+          echo "Файл: $DTS"
+          python3 - "$DTS" <<'PYEOF'
+          import re, sys, pathlib
+
+          path = pathlib.Path(sys.argv[1])
+          src = path.read_text()
+
+          mac_refs = re.findall(r'mtd-mac-address\s*=\s*<&(\w+)\s+0x([0-9a-fA-F]+)>;', src)
+          cal_refs = re.findall(r'mtd-cal-data\s*=\s*<&(\w+)\s+0x([0-9a-fA-F]+)>;', src)
+          print("MAC-ссылки:", mac_refs)
+          print("CAL-ссылки:", cal_refs)
+          if not mac_refs and not cal_refs:
+              print("ОШИБКА: в dts нет mtd-cal-data/mtd-mac-address — схема не соответствует ожиданиям, нужен ручной разбор")
+              sys.exit(1)
+
+          prefix = {"macaddr": "macaddr", "calibration": "cal"}
+          cells_by_base = {}
+          for kind, refs in (("macaddr", mac_refs), ("calibration", cal_refs)):
+              for base, off in refs:
+                  o = int(off, 16)
+                  name = f"{prefix[kind]}_{base}_{o:x}"
+                  if name in cells_by_base.get(base, {}):
+                      continue
+                  if kind == "macaddr":
+                      node = f"\t\t{name}: macaddr@{o:x} {{\n\t\t\treg = <0x{o:x} 0x6>;\n\t\t}};\n"
+                  else:
+                      node = f"\t\t{name}: calibration@{o:x} {{\n\t\t\treg = <0x{o:x} 0x440>;\n\t\t}};\n"
+                  cells_by_base.setdefault(base, {})[name] = node
+
+          for base, off in mac_refs:
+              o = int(off, 16)
+              name = f"macaddr_{base}_{o:x}"
+              src = re.sub(rf'mtd-mac-address\s*=\s*<&{base}\s+0x{off}>;',
+                           f'nvmem-cells = <&{name}>;\n\tnvmem-cell-names = "mac-address";', src)
+          for base, off in cal_refs:
+              o = int(off, 16)
+              name = f"cal_{base}_{o:x}"
+              src = re.sub(rf'mtd-cal-data\s*=\s*<&{base}\s+0x{off}>;',
+                           f'nvmem-cells = <&{name}>;\n\tnvmem-cell-names = "calibration";', src)
+
+          for base, cells in cells_by_base.items():
+              m = re.search(rf'{base}:\s*partition@([0-9a-fA-F]+)\s*\{{', src)
+              if not m:
+                  print(f"ОШИБКА: partition-узел {base}: не найден в dts")
+                  sys.exit(1)
+              start = m.end() - 1
+              depth = 0
+              end = None
+              for j in range(start, len(src)):
+                  if src[j] == '{':
+                      depth += 1
+                  elif src[j] == '}':
+                      depth -= 1
+                      if depth == 0:
+                          end = j
+                          break
+              if end is None:
+                  print(f"ОШИБКА: не найдена закрывающая скобка узла {base}:")
+                  sys.exit(1)
+              inject = ('\n\t\tcompatible = "nvmem-cells";\n'
+                        '\t\t#address-cells = <1>;\n'
+                        '\t\t#size-cells = <1>;\n\n'
+                        + '\n'.join(c.rstrip('\n') for c in cells.values()) + '\n\n')
+              src = src[:end] + inject + src[end:]
+
+          if 'mtd-cal-data' in src or 'mtd-mac-address' in src:
+              print("ОШИБКА: в dts остались старые свойства — конвертация не полная")
+              sys.exit(1)
+          if 'calibration' not in src or 'mac-address' not in src:
+              print("ОШИБКА: nvmem-ячейки не добавлены")
+              sys.exit(1)
+
+          path.write_text(src)
+          print("DTS конвертирован на nvmem-cells")
+          PYEOF
+          echo "=== Итоговый dts: ==="
+          cat "$DTS"
 
       - name: Write resolved 02_network
         run: |
@@ -326,7 +415,7 @@ jobs:
       - name: Verify config
         run: |
           cd openwrt
-          echo "=== VERIFY-CONFIG v8 ==="
+          echo "=== VERIFY-CONFIG v9 ==="
           grep -q "CONFIG_TARGET_ath79_nand_DEVICE_perenio_peacg01=y" .config \
             || { echo "ОШИБКА: профиль perenio_peacg01 не включён в .config"; exit 1; }
           grep -q "CONFIG_PACKAGE_ser2net=y" .config \
@@ -350,13 +439,14 @@ jobs:
           echo "=== Результаты сборки: ==="
           find bin/targets -type f 2>/dev/null | sort || echo "bin/targets пуст — сборка не завершилась"
 
-      - name: Upload images (sysupgrade only)
+      - name: Upload images
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: openwrt-peacg01-25.12.6-sysupgrade
+          name: openwrt-peacg01-25.12.6
           path: |
             openwrt/bin/targets/ath79/nand/*sysupgrade.tar
+            openwrt/bin/targets/ath79/nand/*initramfs-kernel.bin
             openwrt/bin/targets/ath79/nand/*.manifest
-            openwrt/bin/targets/ath79/nand/*.sha256sum
+            openwrt/bin/targets/ath79/nand/sha256sums
           if-no-files-found: error
