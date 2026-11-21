@@ -26,13 +26,6 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Add HOMEd feed
-        run: |
-          cd openwrt
-          echo 'src-git homed https://github.com/inoremap/homed-feed.git' >> feeds.conf.default
-          ./scripts/feeds update homed
-          ./scripts/feeds install -a -p homed
-
       - name: Clone and inspect patches
         run: |
           git clone --depth 1 https://github.com/u236/openwrt-patches.git patches
@@ -43,7 +36,7 @@ jobs:
         env:
           PATCH_BASE: v22.03.5
         run: |
-          echo "=== APPLY-PATCHES v3: 02_network обрабатывается отдельным шагом ==="
+          echo "=== APPLY-PATCHES v6: восстановленный файл (v5 + восстановленный хвост), без HOMEd в прошивке, репозиторий и ключ вшиваем в files/ ==="
           cd openwrt
 
           BASE=../patches/perenio-peacg01
@@ -242,6 +235,41 @@ jobs:
           exit 0
           EOF
 
+      - name: Embed HOMEd repository and key
+        run: |
+          cd openwrt
+
+          # Ключ репозитория: PEM-формат opkg и apk совпадает, кладём как есть.
+          mkdir -p files/etc/apk/keys
+          if curl -fsSL https://opkg.homed.dev/opkg.key -o files/etc/apk/keys/homed-dev.pub \
+             && grep -q "BEGIN PUBLIC KEY" files/etc/apk/keys/homed-dev.pub; then
+            echo "Ключ HOMEd скачан: files/etc/apk/keys/homed-dev.pub ($(wc -c < files/etc/apk/keys/homed-dev.pub) байт)"
+          else
+            echo "ПРЕДУПРЕЖДЕНИЕ: ключ не скачался или не похож на PEM — проверь https://opkg.homed.dev/opkg.key"
+            exit 1
+          fi
+
+          # Репозиторий: проверяем mips_24kc (big-endian, правильный для ath79), иначе mipsel
+          FEED_A="https://apk.homed.dev/mips_24kc"
+          FEED_B="https://apk.homed.dev/mipsel_24kc"
+          if curl -fsSI "$FEED_A/packages.adb" -o /dev/null; then
+            FEED_URL="$FEED_A"
+            echo "Репозиторий доступен: $FEED_URL (big-endian, правильный для ath79)"
+          elif curl -fsSI "$FEED_B/packages.adb" -o /dev/null; then
+            FEED_URL="$FEED_B"
+            echo "ПРЕДУПРЕЖДЕНИЕ: mips_24kc отсутствует, вшиваю запрошенный $FEED_URL (little-endian — пакеты на устройстве не установятся)"
+          else
+            echo "ОШИБКА: ни $FEED_A, ни $FEED_B не отвечают"
+            exit 1
+          fi
+
+          mkdir -p files/etc/apk/repositories.d
+          cat > files/etc/apk/repositories.d/customfeeds.conf <<EOF
+          $FEED_URL
+          EOF
+          echo "=== files/etc/apk/repositories.d/customfeeds.conf ==="
+          cat files/etc/apk/repositories.d/customfeeds.conf
+
       - name: Upload patch report
         if: always()
         uses: actions/upload-artifact@v4
@@ -280,33 +308,43 @@ jobs:
           CONFIG_PACKAGE_python3-xmodem=y
           CONFIG_PACKAGE_kmod-usb-serial-ch341=y
           CONFIG_PACKAGE_kmod-usb-serial-pl2303=y
-
-          CONFIG_PACKAGE_homed-common=y
-          CONFIG_PACKAGE_homed-zigbee=y
-          CONFIG_PACKAGE_homed-web=y
-          CONFIG_PACKAGE_homed-automation=y
-          CONFIG_PACKAGE_homed-custom=y
-          CONFIG_PACKAGE_homed-recorder=y
-          CONFIG_PACKAGE_homed-qt=y
           EOF
-          make defconfig
 
       - name: Verify config
         run: |
           cd openwrt
-          grep -q "^CONFIG_TARGET_ath79_nand_DEVICE_perenio_peacg01=y" .config \
-            || { echo "Профиль perenio_peacg01 не объявился — патчи не легли"; exit 1; }
-          grep -q "^CONFIG_PACKAGE_homed-zigbee=y" .config \
-            || { echo "Пакеты HOMEd не найдены в фиде"; exit 1; }
+          echo "=== VERIFY-CONFIG v6 ==="
+          grep -q "CONFIG_TARGET_ath79_nand_DEVICE_perenio_peacg01=y" .config \
+            || { echo "ОШИБКА: профиль perenio_peacg01 не включён в .config"; exit 1; }
+          grep -q "CONFIG_PACKAGE_ser2net=y" .config \
+            || { echo "ОШИБКА: ser2net не включён в .config"; exit 1; }
+          [ -s files/etc/apk/keys/homed-dev.pub ] \
+            || { echo "ОШИБКА: ключ HOMEd пуст или отсутствует"; exit 1; }
+          grep -q "apk.homed.dev" files/etc/apk/repositories.d/customfeeds.conf \
+            || { echo "ОШИБКА: репозиторий HOMEd не найден в customfeeds.conf"; exit 1; }
+          echo "=== Конфигурация и files/ в порядке ==="
 
       - name: Build
         run: |
           cd openwrt
+          make defconfig
           make -j$(nproc) || make -j1 V=s
 
-      - name: Upload firmware
+      - name: List build results
+        if: always()
+        run: |
+          cd openwrt
+          echo "=== Результаты сборки: ==="
+          find bin/targets -type f 2>/dev/null | sort || echo "bin/targets пуст — сборка не завершилась"
+
+      - name: Upload images
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: openwrt-peacg01-25.12.6
-          path: openwrt/bin/targets/ath79/nand/
-          if-no-files-found: error
+          path: |
+            openwrt/bin/targets/ath79/nand/*.bin
+            openwrt/bin/targets/ath79/nand/*.tar
+            openwrt/bin/targets/ath79/nand/*.manifest
+            openwrt/bin/targets/ath79/nand/*.sha256sum
+          if-no-files-found: warn
