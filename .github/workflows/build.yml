@@ -256,7 +256,7 @@ jobs:
           cat > .config <<'EOF'
           CONFIG_TARGET_ath79=y
           CONFIG_TARGET_ath79_nand=y
-          CONFIG_TARGET_ath79_nand_Device_perenio_peacg01=y
+          CONFIG_TARGET_ath79_nand_DEVICE_perenio_peacg01=y
 
           CONFIG_PACKAGE_luci=y
           CONFIG_PACKAGE_luci-app-firewall=y
@@ -294,27 +294,8 @@ jobs:
       - name: Verify config
         run: |
           cd openwrt
-          echo "=== 1. perenio в слитом nand.mk (с контекстом) ==="
-          grep -n -B2 -A35 "perenio" target/linux/ath79/image/nand.mk \
-            || echo "Блок Device/perenio НЕ НАЙДЕН в nand.mk"
-
-          echo "=== 2. dts-файл на месте? ==="
-          ls target/linux/ath79/dts/ | grep -i perenio || echo "dts НЕ НАЙДЕН"
-
-          echo "=== 3. perenio в tmp/.targetinfo (парсинг image-файлов) ==="
-          grep -rn "perenio" tmp/.targetinfo | head -20 || echo "targetinfo про девайс НЕ ЗНАЕТ"
-
-          echo "=== 4. авторский .config: точное имя символа профиля ==="
-          grep -in "perenio\|peacg" ../patches/perenio-peacg01/v22.03.5/.config \
-            || echo "в авторском .config профиля нет"
-
-          echo "=== 5. все Device-символы ath79/nand в текущем .config ==="
-          grep "^CONFIG_TARGET_ath79_nand_Device" .config | head -80
-
-          if ! grep -q "^CONFIG_TARGET_ath79_nand_Device_perenio_peacg01=y" .config; then
-            echo "Профиль perenio_peacg01 не объявился"
-            exit 1
-          fi
+          grep -q "^CONFIG_TARGET_ath79_nand_DEVICE_perenio_peacg01=y" .config \
+            || { echo "Профиль perenio_peacg01 не объявился — патчи не легли"; exit 1; }
           grep -q "^CONFIG_PACKAGE_homed-zigbee=y" .config \
             || { echo "Пакеты HOMEd не найдены в фиде"; exit 1; }
 
